@@ -9,7 +9,16 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 # ── Configure Gemini ──────────────────────────────────────────────────────────
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+
+# response_mime_type="application/json" forces Gemini to ALWAYS return valid JSON.
+# temperature=0 makes output deterministic — no hallucinated or echoed numbers.
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    generation_config=genai.GenerationConfig(
+        response_mime_type="application/json",
+        temperature=0,
+    ),
+)
 
 app = FastAPI(title="Expense Tracker Agent", version="0.1.0")
 
@@ -24,7 +33,7 @@ class Expense(Base):
     id       = Column(Integer, primary_key=True, index=True)
     text     = Column(String, nullable=False)
     category = Column(String, nullable=False)
-    amount   = Column(Float, nullable=False)   # FIX: was Integer (truncated decimals)
+    amount   = Column(Float, nullable=False)
 
 
 Base.metadata.create_all(bind=engine)
@@ -53,6 +62,8 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
                       "class", "study", "notes"],
 }
 
+VALID_CATEGORIES = set(CATEGORY_KEYWORDS.keys()) | {"Other"}
+
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 class ExpenseInput(BaseModel):
@@ -66,13 +77,43 @@ class ExpenseResponse(BaseModel):
     amount:   float
 
 
-# ── Helper: keyword-based category detection ──────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def keyword_category(text: str) -> str:
+    """Determine category purely from keywords in the input text."""
     text_lower = text.lower()
     for category, keywords in CATEGORY_KEYWORDS.items():
         if any(k in text_lower for k in keywords):
             return category
     return "Other"
+
+
+def extract_amount_from_text(text: str) -> float:
+    """
+    Extract the most likely monetary amount from a free-text expense description.
+
+    Priority:
+      1. Number after a currency symbol  →  "₹250"  "Rs 49.99"
+      2. First number >= 10 in the text  →  "Paid 250 for Uber ride"
+      3. Any number found                →  "5 coffees"
+      4. 0.0 if nothing found
+    """
+    # 1. Currency-prefixed number
+    prefixed = re.search(r"(?:₹|rs\.?\s*)(\d[\d,]*(?:\.\d+)?)", text, re.IGNORECASE)
+    if prefixed:
+        return float(prefixed.group(1).replace(",", ""))
+
+    # 2. All numbers — pick first that is >= 10 to skip counts like "1 ride"
+    all_numbers = re.findall(r"\d[\d,]*(?:\.\d+)?", text)
+    for n in all_numbers:
+        val = float(n.replace(",", ""))
+        if val >= 10:
+            return val
+
+    # 3. Fallback: whatever number exists
+    if all_numbers:
+        return float(all_numbers[0].replace(",", ""))
+
+    return 0.0
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -88,67 +129,58 @@ def categorize(input: ExpenseInput):
     if not input.text.strip():
         raise HTTPException(status_code=400, detail="Expense text cannot be empty.")
 
-    # Pre-extract amount from raw input text as ground truth
-    # This is used in fallback AND to correct Gemini returning 0 when amount is clear
-    input_amount_match = re.findall(r"\d+\.?\d*", input.text)
-    input_amount = float(input_amount_match[0]) if input_amount_match else 0.0
+    # ── Step 1: Extract amount directly from input text (always-reliable baseline)
+    input_amount = extract_amount_from_text(input.text)
 
-    # Prompt: no hardcoded numbers in the example to avoid Gemini echoing them back
-    prompt = f"""
-You are an expense classifier. Extract the category and amount from the expense text below.
+    # ── Step 2: Ask Gemini with JSON mode enforced ────────────────────────────
+    # No example numbers in the prompt — avoids Gemini echoing them.
+    prompt = f"""You are an expense classifier.
 
-Categories (pick exactly one): Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other
+Given the expense text below, return a JSON object with exactly two keys:
+  "category": one of Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other
+  "amount": the numeric rupee amount from the text as a number (not a string). Use 0 if no amount is mentioned.
 
-Respond with ONLY a raw JSON object — no markdown, no backticks, no explanation:
-{{"category": "...", "amount": ...}}
-
-Rules:
-- "amount" must be a numeric value (integer or float), NOT a string.
-- Extract the numeric amount directly from the expense text.
-- If no amount is mentioned, use 0.
-
-Expense: {input.text}
-"""
+Expense: {input.text}"""
 
     result = {"category": "Other", "amount": input_amount}
 
     try:
         response = model.generate_content(prompt)
         text_response = (response.text or "").strip()
-        print("RAW Gemini response:", text_response)
+        print(f"[Gemini RAW] '{input.text}' → '{text_response}'")
 
-        # Strip markdown fences if Gemini added them anyway
-        text_response = re.sub(r"```(?:json)?\s*|```", "", text_response).strip()
+        parsed = json.loads(text_response)
 
+        # Validate category
+        gemini_category = str(parsed.get("category", "Other")).strip()
+        result["category"] = gemini_category if gemini_category in VALID_CATEGORIES \
+                             else keyword_category(input.text)
+
+        # Sanitise amount (Gemini may return "250" as string or 250 as number)
+        raw_amount = parsed.get("amount", 0)
         try:
-            parsed = json.loads(text_response)
-            result["category"] = str(parsed.get("category", "Other")).strip()
+            gemini_amount = float(str(raw_amount).replace(",", "").strip())
+        except (ValueError, TypeError):
+            gemini_amount = 0.0
 
-            # Handle Gemini returning amount as string e.g. "250" instead of 250
-            raw_amount = parsed.get("amount", 0)
-            try:
-                gemini_amount = float(str(raw_amount).replace(",", ""))
-            except (ValueError, TypeError):
-                gemini_amount = 0.0
+        # If Gemini returned 0 but we know the amount from the text, use our value
+        result["amount"] = gemini_amount if gemini_amount > 0 else input_amount
+        print(f"[Result] category={result['category']}  amount={result['amount']}")
 
-            # If Gemini returned 0 but we extracted a number from input, trust input
-            result["amount"] = gemini_amount if gemini_amount > 0 else input_amount
-
-        except json.JSONDecodeError:
-            print("JSON parse failed — using keyword + input-text fallback")
-            result["category"] = keyword_category(input.text)
-            result["amount"]   = input_amount   # always extracted from original input
-
-    except Exception as e:
-        print("Gemini error:", e)
+    except json.JSONDecodeError as e:
+        print(f"[JSON parse failed] {e} — keyword fallback")
         result["category"] = keyword_category(input.text)
         result["amount"]   = input_amount
 
-    # Warn (but still save) when amount could not be determined
-    if result["amount"] <= 0:
-        print(f"Warning: amount is {result['amount']} for input: '{input.text}'")
+    except Exception as e:
+        print(f"[Gemini error] {e} — keyword fallback")
+        result["category"] = keyword_category(input.text)
+        result["amount"]   = input_amount
 
-    # FIX: session always closed via try/finally
+    if result["amount"] <= 0:
+        print(f"[Warning] amount=0 for: '{input.text}'")
+
+    # ── Step 3: Persist ───────────────────────────────────────────────────────
     db = SessionLocal()
     try:
         expense = Expense(
@@ -168,7 +200,7 @@ Expense: {input.text}
 
 @app.get("/total")
 def get_total():
-    """Return the total amount spent across all expenses."""
+    """Return the sum of all expense amounts."""
     db = SessionLocal()
     try:
         total = sum(e.amount for e in db.query(Expense).all())
@@ -179,7 +211,7 @@ def get_total():
 
 @app.get("/logs", response_model=list[ExpenseResponse])
 def get_logs():
-    """Return all stored expense records."""
+    """Return all expense records, newest first."""
     db = SessionLocal()
     try:
         expenses = db.query(Expense).order_by(Expense.id.desc()).all()
@@ -193,7 +225,7 @@ def get_logs():
 
 @app.get("/category-summary")
 def category_summary():
-    """Return total amount spent per category."""
+    """Return total spend per category, sorted highest first."""
     db = SessionLocal()
     try:
         expenses = db.query(Expense).all()
@@ -204,13 +236,12 @@ def category_summary():
     for e in expenses:
         summary[e.category] = round(summary.get(e.category, 0.0) + e.amount, 2)
 
-    # Sort by amount descending for readability
     return dict(sorted(summary.items(), key=lambda x: x[1], reverse=True))
 
 
 @app.delete("/logs/{expense_id}")
 def delete_expense(expense_id: int):
-    """Delete a specific expense by ID."""
+    """Delete a specific expense record by ID."""
     db = SessionLocal()
     try:
         expense = db.query(Expense).filter(Expense.id == expense_id).first()
