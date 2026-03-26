@@ -47,18 +47,31 @@ def read_root():
 def categorize_expense(input: ExpenseInput):
 
     prompt = f"""
-    Extract:
-    1. Category (Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other)
-    2. Amount (number only)
+You are a strict expense classification system.
 
-    Return JSON:
-    {{
-      "category": "...",
-      "amount": 0
-    }}
+Your job:
+1. Extract amount (number only)
+2. Classify into EXACTLY one category:
 
-    Expense: "{input.text}"
-    """
+Categories:
+Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other
+
+Rules (VERY IMPORTANT):
+- Uber, Ola, auto, taxi, metro → Transport
+- Pizza, restaurant, food, Swiggy, Zomato → Food
+- Amazon, Flipkart, clothes, shoes → Shopping
+- Electricity, bill, recharge → Bills
+- Netflix, movie → Entertainment
+- Doctor, hospital → Health
+- Course, fees → Education
+
+Return ONLY JSON (no explanation):
+{{"category": "Transport", "amount": 250}}
+
+If unsure → use "Other"
+
+Expense: "{input.text}"
+"""
 
     try:
         response = model.generate_content(prompt)
