@@ -60,11 +60,6 @@ Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other
 Rules:
 Uber/Ola/Taxi/Auto → Transport
 Pizza/Food/Restaurant → Food
-Amazon/Flipkart → Shopping
-Electricity/Bill → Bills
-Netflix/Movie → Entertainment
-Doctor/Hospital → Health
-Course/Fees → Education
 
 Return ONLY JSON:
 {{"category":"Transport","amount":250}}
@@ -74,106 +69,53 @@ Expense: {input.text}
 
     try:
         response = model.generate_content(prompt)
+        text_response = (response.text or "").strip()
 
-        # 🔍 Debug (optional)
-        print("RAW RESPONSE:", response.text)
+        print("RAW RESPONSE:", text_response)
 
-        text_response = response.text.strip()
-
-        # ✅ Safe JSON parsing
-        if text_response.startswith("{"):
+        # Try JSON first
+        try:
             result = json.loads(text_response)
-        else:
-            match = re.search(r'\{.*\}', text_response, re.DOTALL)
-            if match:
-                result = json.loads(match.group())
-            else:
-                result = {"category": "Other", "amount": 0}
+        except:
+            text_lower = text_response.lower()
+
+            category = "Other"
+            if "transport" in text_lower:
+                category = "Transport"
+            elif "food" in text_lower:
+                category = "Food"
+
+            # Extract amount
+            amount_match = re.findall(r'\d+', text_response)
+            amount = int(amount_match[0]) if amount_match else 0
+
+            result = {
+                "category": category,
+                "amount": amount
+            }
 
     except Exception as e:
         print("Error:", e)
         result = {"category": "Other", "amount": 0}
 
-    # 🔥 Keyword fallback (IMPORTANT)
+    # 🔥 Final fallback (VERY IMPORTANT)
     text = input.text.lower()
 
-    try:
-    response = model.generate_content(prompt)
-    text_response = response.text.strip()
+    if result["category"] == "Other":
+        if any(word in text for word in ["uber", "ola", "taxi", "auto", "metro"]):
+            result["category"] = "Transport"
+        elif any(word in text for word in ["pizza", "food", "restaurant", "swiggy", "zomato"]):
+            result["category"] = "Food"
 
-    print("RAW RESPONSE:", text_response)
-
-    # Try JSON first
-    try:
-        result = json.loads(text_response)
-    except:
-        text_lower = text_response.lower()
-
-        # Category detection
-        category = "Other"
-        if "transport" in text_lower:
-            category = "Transport"
-        elif "food" in text_lower:
-            category = "Food"
-        elif "shopping" in text_lower:
-            category = "Shopping"
-        elif "bills" in text_lower:
-            category = "Bills"
-        elif "entertainment" in text_lower:
-            category = "Entertainment"
-        elif "health" in text_lower:
-            category = "Health"
-        elif "education" in text_lower:
-            category = "Education"
-
-        # ✅ FIXED AMOUNT EXTRACTION
-        amount_match = re.findall(r'\d+', text_response)
-        amount = int(amount_match[0]) if amount_match else 0
-
-        result = {
-            "category": category,
-            "amount": amount
-        }
-
-except Exception as e:
-    print("Error:", e)
-    result = {"category": "Other", "amount": 0}
-
-
-# Total expense
-@app.get("/total")
-def get_total():
+    # Save to DB
     db = SessionLocal()
-    total = sum(e.amount for e in db.query(Expense).all())
-    db.close()
-    return {"total_expense": total}
-
-
-# Logs
-@app.get("/logs")
-def get_logs():
-    db = SessionLocal()
-    expenses = db.query(Expense).all()
+    expense = Expense(
+        text=input.text,
+        category=result["category"],
+        amount=result["amount"]
+    )
+    db.add(expense)
+    db.commit()
     db.close()
 
-    return {
-        "expenses": [
-            {"text": e.text, "category": e.category, "amount": e.amount}
-            for e in expenses
-        ]
-    }
-
-
-# Category summary
-@app.get("/category-summary")
-def category_summary():
-    db = SessionLocal()
-    expenses = db.query(Expense).all()
-    db.close()
-
-    summary = {}
-    for e in expenses:
-        summary[e.category] = summary.get(e.category, 0) + e.amount
-
-    return summary
-print("RAW RESPONSE:", response.text)    
+    return result
