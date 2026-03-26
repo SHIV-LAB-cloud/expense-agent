@@ -97,34 +97,47 @@ Expense: {input.text}
     # 🔥 Keyword fallback (IMPORTANT)
     text = input.text.lower()
 
-    if result["category"] == "Other":
-        if any(word in text for word in ["uber", "ola", "taxi", "auto", "metro"]):
-            result["category"] = "Transport"
-        elif any(word in text for word in ["pizza", "food", "restaurant", "swiggy", "zomato"]):
-            result["category"] = "Food"
-        elif any(word in text for word in ["amazon", "flipkart", "clothes", "shoes"]):
-            result["category"] = "Shopping"
-        elif any(word in text for word in ["electricity", "bill", "recharge"]):
-            result["category"] = "Bills"
-        elif any(word in text for word in ["netflix", "movie"]):
-            result["category"] = "Entertainment"
-        elif any(word in text for word in ["doctor", "hospital"]):
-            result["category"] = "Health"
-        elif any(word in text for word in ["course", "fees"]):
-            result["category"] = "Education"
+    try:
+    response = model.generate_content(prompt)
+    text_response = response.text.strip()
 
-    # Save to DB
-    db = SessionLocal()
-    expense = Expense(
-        text=input.text,
-        category=result["category"],
-        amount=result["amount"]
-    )
-    db.add(expense)
-    db.commit()
-    db.close()
+    print("RAW RESPONSE:", text_response)
 
-    return result
+    # Try JSON first
+    try:
+        result = json.loads(text_response)
+    except:
+        text_lower = text_response.lower()
+
+        # Category detection
+        category = "Other"
+        if "transport" in text_lower:
+            category = "Transport"
+        elif "food" in text_lower:
+            category = "Food"
+        elif "shopping" in text_lower:
+            category = "Shopping"
+        elif "bills" in text_lower:
+            category = "Bills"
+        elif "entertainment" in text_lower:
+            category = "Entertainment"
+        elif "health" in text_lower:
+            category = "Health"
+        elif "education" in text_lower:
+            category = "Education"
+
+        # ✅ FIXED AMOUNT EXTRACTION
+        amount_match = re.findall(r'\d+', text_response)
+        amount = int(amount_match[0]) if amount_match else 0
+
+        result = {
+            "category": category,
+            "amount": amount
+        }
+
+except Exception as e:
+    print("Error:", e)
+    result = {"category": "Other", "amount": 0}
 
 
 # Total expense
