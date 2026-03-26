@@ -163,3 +163,4 @@ def category_summary():
         summary[e.category] = summary.get(e.category, 0) + e.amount
 
     return summary
+print("RAW RESPONSE:", response.text)    
