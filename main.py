@@ -14,7 +14,7 @@ load_dotenv()
 # ✅ Use ENV variable (IMPORTANT)
 genai.configure(api_key=os.getenv("AIzaSyCwApDydpnGn5KTbXPzaKmzKU7UvePTEUw"))
 
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 app = FastAPI(title="Expense Tracker Agent")
 
@@ -112,9 +112,4 @@ def category_summary():
 
     return summary
 
-# ✅ Cloud Run compatible startup
-import uvicorn
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
