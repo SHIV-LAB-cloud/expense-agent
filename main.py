@@ -88,47 +88,61 @@ def categorize(input: ExpenseInput):
     if not input.text.strip():
         raise HTTPException(status_code=400, detail="Expense text cannot be empty.")
 
-    prompt = f"""
-Classify this expense into exactly one of these categories:
-Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other
+    # Pre-extract amount from raw input text as ground truth
+    # This is used in fallback AND to correct Gemini returning 0 when amount is clear
+    input_amount_match = re.findall(r"\d+\.?\d*", input.text)
+    input_amount = float(input_amount_match[0]) if input_amount_match else 0.0
 
-Return ONLY a valid JSON object with no extra text, no markdown, no backticks:
-{{"category": "Transport", "amount": 250}}
+    # Prompt: no hardcoded numbers in the example to avoid Gemini echoing them back
+    prompt = f"""
+You are an expense classifier. Extract the category and amount from the expense text below.
+
+Categories (pick exactly one): Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other
+
+Respond with ONLY a raw JSON object — no markdown, no backticks, no explanation:
+{{"category": "...", "amount": ...}}
 
 Rules:
-- "amount" must be a number (integer or float).
-- If amount is not clear from the text, return 0.
-- Use "Other" only if no category fits.
+- "amount" must be a numeric value (integer or float), NOT a string.
+- Extract the numeric amount directly from the expense text.
+- If no amount is mentioned, use 0.
 
 Expense: {input.text}
 """
 
-    result = {"category": "Other", "amount": 0.0}
+    result = {"category": "Other", "amount": input_amount}
 
     try:
         response = model.generate_content(prompt)
         text_response = (response.text or "").strip()
         print("RAW Gemini response:", text_response)
 
-        # Strip markdown fences if present
-        text_response = re.sub(r"```(?:json)?|```", "", text_response).strip()
+        # Strip markdown fences if Gemini added them anyway
+        text_response = re.sub(r"```(?:json)?\s*|```", "", text_response).strip()
 
         try:
             parsed = json.loads(text_response)
             result["category"] = str(parsed.get("category", "Other")).strip()
-            result["amount"]   = float(parsed.get("amount", 0))
+
+            # Handle Gemini returning amount as string e.g. "250" instead of 250
+            raw_amount = parsed.get("amount", 0)
+            try:
+                gemini_amount = float(str(raw_amount).replace(",", ""))
+            except (ValueError, TypeError):
+                gemini_amount = 0.0
+
+            # If Gemini returned 0 but we extracted a number from input, trust input
+            result["amount"] = gemini_amount if gemini_amount > 0 else input_amount
 
         except json.JSONDecodeError:
-            # FIX: fallback ONLY runs when Gemini JSON fails, not every call
-            print("JSON parse failed — using keyword fallback")
+            print("JSON parse failed — using keyword + input-text fallback")
             result["category"] = keyword_category(input.text)
-            amount_match = re.findall(r"\d+\.?\d*", text_response)
-            result["amount"] = float(amount_match[0]) if amount_match else 0.0
+            result["amount"]   = input_amount   # always extracted from original input
 
     except Exception as e:
         print("Gemini error:", e)
-        # Still attempt keyword fallback so we don't return empty data
         result["category"] = keyword_category(input.text)
+        result["amount"]   = input_amount
 
     # Warn (but still save) when amount could not be determined
     if result["amount"] <= 0:
