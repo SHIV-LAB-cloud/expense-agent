@@ -4,52 +4,38 @@ import google.generativeai as genai
 import os
 import json
 import re
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# Load environment variables
-load_dotenv()
-
-# ✅ Configure Gemini using ENV variable
+# Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# ✅ Use stable model
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# FastAPI app
 app = FastAPI(title="Expense Tracker Agent")
 
-# Database setup
+# Database
 engine = create_engine("sqlite:///expenses.db")
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# Database table
 class Expense(Base):
     __tablename__ = "expenses"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     text = Column(String)
     category = Column(String)
     amount = Column(Integer)
 
 Base.metadata.create_all(bind=engine)
 
-# Input schema
 class ExpenseInput(BaseModel):
     text: str
 
-# Root endpoint
 @app.get("/")
-def read_root():
-    return {
-        "message": "Expense Tracker Agent Running 🚀",
-        "docs": "/docs"
-    }
+def home():
+    return {"message": "API Running 🚀", "docs": "/docs"}
 
-# Main AI endpoint
 @app.post("/categorize")
-def categorize_expense(input: ExpenseInput):
+def categorize(input: ExpenseInput):
 
     prompt = f"""
 Classify this expense.
@@ -57,11 +43,7 @@ Classify this expense.
 Categories:
 Food, Transport, Shopping, Bills, Entertainment, Health, Education, Other
 
-Rules:
-Uber/Ola/Taxi/Auto → Transport
-Pizza/Food/Restaurant → Food
-
-Return ONLY JSON:
+Return JSON:
 {{"category":"Transport","amount":250}}
 
 Expense: {input.text}
@@ -71,9 +53,9 @@ Expense: {input.text}
         response = model.generate_content(prompt)
         text_response = (response.text or "").strip()
 
-        print("RAW RESPONSE:", text_response)
+        print("RAW:", text_response)
 
-        # Try JSON first
+        # Try JSON
         try:
             result = json.loads(text_response)
         except:
@@ -85,37 +67,32 @@ Expense: {input.text}
             elif "food" in text_lower:
                 category = "Food"
 
-            # Extract amount
             amount_match = re.findall(r'\d+', text_response)
             amount = int(amount_match[0]) if amount_match else 0
 
-            result = {
-                "category": category,
-                "amount": amount
-            }
+            result = {"category": category, "amount": amount}
 
     except Exception as e:
         print("Error:", e)
         result = {"category": "Other", "amount": 0}
 
-    # 🔥 Final fallback (VERY IMPORTANT)
+    # Fallback
     text = input.text.lower()
-
     if result["category"] == "Other":
-        if any(word in text for word in ["uber", "ola", "taxi", "auto", "metro"]):
+        if "uber" in text or "ola" in text:
             result["category"] = "Transport"
-        elif any(word in text for word in ["pizza", "food", "restaurant", "swiggy", "zomato"]):
-            result["category"] = "Food"
 
-    # Save to DB
+    # Save
     db = SessionLocal()
-    expense = Expense(
-        text=input.text,
-        category=result["category"],
-        amount=result["amount"]
-    )
-    db.add(expense)
+    db.add(Expense(text=input.text, category=result["category"], amount=result["amount"]))
     db.commit()
     db.close()
 
     return result
+
+@app.get("/total")
+def total():
+    db = SessionLocal()
+    total = sum(e.amount for e in db.query(Expense).all())
+    db.close()
+    return {"total": total}
