@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 load_dotenv()
 
 # ✅ Use ENV variable (IMPORTANT)
-genai.configure(api_key=os.getenv("AIzaSyCwApDydpnGn5KTbXPzaKmzKU7UvePTEUw"))
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 model = genai.GenerativeModel("gemini-2.5-flash")
 
