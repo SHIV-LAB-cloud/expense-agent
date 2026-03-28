@@ -1,2 +1,19 @@
+# Ignore Python virtual environment internals (but keep your custom files in venv/)
+venv/Include/
+venv/Lib/
+venv/Scripts/
+venv/pyvenv.cfg
+venv/share/
+
+# Ignore environment variables
 .env
-.env
+venv/.env
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
